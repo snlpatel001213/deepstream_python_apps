@@ -39,8 +39,7 @@ from common.bus_call import bus_call
 from common.FPS import GETFPS
 import pyds
 
-fps_streams={}
-stream_list = ["rtsp://10.32.187.36:1935/nvtestvideo/_definst_/Rosie/GoPro2_Cafeteria_Tables.mp4", "rtsp://10.32.187.36:1935/nvtestvideo/_definst_/Rosie/GoPro2_Cash_Registers.mp4", "rtsp://10.32.187.36:1935/nvtestvideo/_definst_/Rosie/C0042_4.mp4.mp4", "rtsp://10.32.187.36:1935/nvtestvideo/_definst_/Rosie/0_Degrees_20ft_4.mp4", "rtsp://10.32.187.36:1935/nvtestvideo/_definst_/Rosie/20ft_45_degrees_2_4.mp4.mp4", "rtsp://10.32.187.36:1935/nvtestvideo/_definst_/Rosie/C0083-QA.m4v.mp4", "rtsp://10.32.187.36:1935/nvtestvideo/_definst_/Rosie/MVI_0042.MOV", "rtsp://10.32.187.36:1935/nvtestvideo/_definst_/Rosie/MVI_0051.MOV", "rtsp://10.32.187.36:1935/nvtestvideo/_definst_/Rosie/MVI_0052.MOV"]
+stream_list = [] 
 
 MAX_DISPLAY_LEN=64
 PGIE_CLASS_ID_VEHICLE = 0
@@ -55,27 +54,35 @@ TILED_OUTPUT_HEIGHT=720
 GST_CAPS_FEATURES_NVMM="memory:NVMM"
 OSD_PROCESS_MODE= 0
 OSD_DISPLAY_TEXT= 0
-num_streams = 0
+number_sources = 0
 pipeline = None
 streammux = None
-tiler = None
+source_to_bin_map = {}
 pgie_classes_str= ["Vehicle", "TwoWheeler", "Person","RoadSign"]
+total_streams = 0
 
-def hello():
-    global num_streams
-    global  pipeline, streammux, tiler
-    print("------------------------STARTING APPEND------------------------")
-    
+def add_source():
+    """
+    Function to demonstrate how to add streams in runtime.
+    """
+    global number_sources , stream_list, total_streams
+    global  pipeline, streammux
+    global source_to_bin_map
+
+    if number_sources == total_streams-1:
+        remove_sources()
+        
+    number_sources =  number_sources + 1
     uri_name = stream_list.pop()
-    print("URINAME : ", uri_name)
-    print("Creating source_bin ",num_streams," \n ")
     if uri_name.find("rtsp://") == 0 :
         is_live = True
-    source_bin=create_source_bin(num_streams, uri_name)
+    source_bin=create_source_bin(number_sources, uri_name)
+    source_to_bin_map[number_sources] = source_bin
     if not source_bin:
         sys.stderr.write("Unable to create source bin \n")
     pipeline.add(source_bin)
-    padname="sink_%u" %num_streams
+    padname="sink_%u" %number_sources
+    streammux.set_property('batch-size', number_sources)
     sinkpad= streammux.get_request_pad(padname) 
     if not sinkpad:
         sys.stderr.write("Unable to create sink pad bin \n")
@@ -83,19 +90,38 @@ def hello():
     if not srcpad:
         sys.stderr.write("Unable to create src pad bin \n")
     srcpad.link(sinkpad)
+    
+    source_bin.set_state(Gst.State.PLAYING)    
+    print("######################### ADDING #################################")
+    print("Current Stream Count : %d ", number_sources)
+    print("###################################################################")
+    return True
 
-    # tiler_rows=int(math.sqrt(num_streams+1))
-    # tiler_columns=int(math.ceil((1.0*(num_streams+1))/tiler_rows))
-    # tiler.set_property("rows",tiler_rows)
-    # tiler.set_property("columns",tiler_columns)
-    # tiler.set_property("width", TILED_OUTPUT_WIDTH)
-    # tiler.set_property("height", TILED_OUTPUT_HEIGHT)
+def remove_sources():
+    """
+    Function to demonstrate how to remove streams in runtime.
+    """
+    global  pipeline, streammux
+    global number_sources
+    global source_to_bin_map
+    for i in source_to_bin_map.keys():
+        print("########################## REMOVING ###############################")
+        print("Current Stream Count : %d ", number_sources)
+        print("###################################################################")
 
-    source_bin.set_state(Gst.State.PLAYING)
-    print("------------------------ENDING APPEND------------------------")
-    num_streams =  num_streams + 1
-    return num_streams
-
+        state_return =  Gst.Element.get_state(source_to_bin_map[i], Gst.State.NULL)
+        padname="sink_%u" %i
+        sinkpad= streammux.get_request_pad(padname)
+        Gst.Pad.send_event(sinkpad, Gst.Event.new_flush_stop (False))
+        Gst.Element.release_request_pad(streammux, sinkpad)
+        Gst.Bin.remove (pipeline, source_to_bin_map[i])
+        number_sources =  number_sources - 1
+        streammux.set_property('batch-size', max(1,number_sources))
+        time.sleep(10)
+        
+    pipeline.set_state(Gst.State.NULL)
+    sys.exit()
+    
 # tiler_sink_pad_buffer_probe  will extract metadata received on OSD sink pad
 # and update params for drawing rectangle, object information etc.
 def tiler_src_pad_buffer_probe(pad,info,u_data):
@@ -171,8 +197,6 @@ def tiler_src_pad_buffer_probe(pad,info,u_data):
         pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)"""
         # print("Frame Number=", frame_number, "Number of Objects=",num_rects,"Vehicle_count=",obj_counter[PGIE_CLASS_ID_VEHICLE],"Person_count=",obj_counter[PGIE_CLASS_ID_PERSON])
 
-        # Get frame rate through this probe
-        # fps_streams["stream{0}".format(frame_meta.pad_index)].get_fps()
         try:
             l_frame=l_frame.next
         except StopIteration:
@@ -251,16 +275,17 @@ def create_source_bin(index,uri):
     return nbin
 
 def main(args):
-    global num_streams
-    global  pipeline, streammux, tiler
+    global number_sources, stream_list, total_streams
+    global  pipeline, streammux
+    global source_to_bin_map
     # Check input arguments
     if len(args) < 2:
         sys.stderr.write("usage: %s <uri1> [uri2] ... [uriN]\n" % args[0])
         sys.exit(1)
 
-    for i in range(0,len(args)-1):
-        fps_streams["stream{0}".format(i)]=GETFPS(i)
-    number_sources=len(args)-1
+    number_sources=0
+    stream_list = args[2:] # stream_list : remaining streams will be added later in runtime
+    total_streams = len(args)-1
 
     # Standard GStreamer initialization
     GObject.threads_init()
@@ -282,24 +307,23 @@ def main(args):
         sys.stderr.write(" Unable to create NvStreamMux \n")
 
     pipeline.add(streammux)
-    for i in range(number_sources):
-        print("Creating source_bin ",i," \n ")
-        uri_name=args[i+1]
-        if uri_name.find("rtsp://") == 0 :
-            is_live = True
-        source_bin=create_source_bin(i, uri_name)
-        if not source_bin:
-            sys.stderr.write("Unable to create source bin \n")
-        pipeline.add(source_bin)
-        padname="sink_%u" %i
-        sinkpad= streammux.get_request_pad(padname) 
-        if not sinkpad:
-            sys.stderr.write("Unable to create sink pad bin \n")
-        srcpad=source_bin.get_static_pad("src")
-        if not srcpad:
-            sys.stderr.write("Unable to create src pad bin \n")
-        srcpad.link(sinkpad)
-        num_streams = num_streams +1 
+    print("Creating source_bin ",0," \n ")
+    uri_name=args[1]
+    if uri_name.find("rtsp://") == 0 :
+        is_live = True
+    source_bin=create_source_bin(0, uri_name)
+    source_to_bin_map[0] = source_bin
+    if not source_bin:
+        sys.stderr.write("Unable to create source bin \n")
+    pipeline.add(source_bin)
+    padname="sink_0"
+    sinkpad= streammux.get_request_pad(padname) 
+    if not sinkpad:
+        sys.stderr.write("Unable to create sink pad bin \n")
+    srcpad=source_bin.get_static_pad("src")
+    if not srcpad:
+        sys.stderr.write("Unable to create src pad bin \n")
+    srcpad.link(sinkpad)
     
     queue1=Gst.ElementFactory.make("queue","queue1")
     queue2=Gst.ElementFactory.make("queue","queue2")
@@ -346,14 +370,14 @@ def main(args):
 
     streammux.set_property('width', 1920)
     streammux.set_property('height', 1080)
-    streammux.set_property('batch-size', number_sources)
+    streammux.set_property('batch-size', max(1,number_sources))
     streammux.set_property('batched-push-timeout', 4000000)
     pgie.set_property('config-file-path', "dstest3_pgie_config.txt")
     pgie_batch_size=pgie.get_property("batch-size")
     if(pgie_batch_size != number_sources):
         print("WARNING: Overriding infer-config batch-size",pgie_batch_size," with number of sources ", number_sources," \n")
         pgie.set_property("batch-size",number_sources)
-    tiler_rows=int(math.sqrt(number_sources))
+    tiler_rows=int(max(1,math.sqrt(number_sources)))
     tiler_columns=int(math.ceil((1.0*number_sources)/tiler_rows))
     tiler.set_property("rows",tiler_rows)
     tiler.set_property("columns",tiler_columns)
@@ -407,10 +431,8 @@ def main(args):
     print("Starting pipeline \n")
     # start play back and listed to events  		
     
-    GObject.timeout_add_seconds(10, hello)
-    print("###################################################################")
-    print("number of active strings : ", num_streams)
-    print("###################################################################")
+    GObject.timeout_add_seconds(10, add_source)
+    
     pipeline.set_state(Gst.State.PLAYING)
     try:
         loop.run()
